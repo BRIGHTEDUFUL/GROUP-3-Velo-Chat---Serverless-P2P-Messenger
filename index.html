@@ -33,11 +33,8 @@
       }
     </style>
     <script>
-      window.process = {
-        env: {
-          NODE_ENV: 'production'
-        }
-      };
+      // Shim process for libraries that expect it (like PeerJS or GenAI)
+      window.process = { env: { NODE_ENV: 'production' } };
     </script>
     <script type="importmap">
 {
