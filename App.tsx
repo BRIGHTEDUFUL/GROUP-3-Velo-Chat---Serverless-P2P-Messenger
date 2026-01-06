@@ -35,14 +35,6 @@ const App: React.FC = () => {
   const connRefs = useRef<Map<string, DataConnection>>(new Map());
   const activeChatIdRef = useRef<string | null>(null);
   const gemini = useRef(new GeminiService());
-  const peerInitialized = useRef(false);
-
-  const generateInviteLink = useCallback((id: string) => {
-    const baseUrl = window.location.origin + window.location.pathname;
-    const url = new URL(baseUrl);
-    url.searchParams.set('id', id);
-    return url.href;
-  }, []);
 
   useEffect(() => {
     activeChatIdRef.current = activeChatId;
@@ -52,10 +44,6 @@ const App: React.FC = () => {
   }, [activeChatId]);
 
   useEffect(() => {
-    if (user) localStorage.setItem('velo_chat_user', JSON.stringify(user));
-  }, [user]);
-
-  useEffect(() => {
     localStorage.setItem('velo_chat_chats', JSON.stringify(chats));
   }, [chats]);
 
@@ -63,7 +51,14 @@ const App: React.FC = () => {
     localStorage.setItem('velo_chat_messages', JSON.stringify(messages));
   }, [messages]);
 
-  const sendPacket = useCallback((peerId: string, packet: P2PDataPacket): boolean => {
+  const generateInviteLink = useCallback((id: string) => {
+    const baseUrl = window.location.origin + window.location.pathname;
+    const url = new URL(baseUrl);
+    url.searchParams.set('id', id);
+    return url.href;
+  }, []);
+
+  const sendPacket = useCallback((peerId: string, packet: P2PDataPacket) => {
     const conn = connRefs.current.get(peerId);
     if (conn && conn.open) {
       conn.send(packet);
@@ -74,235 +69,132 @@ const App: React.FC = () => {
 
   const handleData = useCallback((data: P2PDataPacket, remotePeerId: string) => {
     switch (data.type) {
-      case 'MESSAGE': {
+      case 'MESSAGE':
         const msg = data.payload;
-        sendPacket(remotePeerId, {
-          type: 'DELIVERY_CONFIRM',
-          payload: { chatId: msg.chatId, messageId: msg.id }
-        });
-
-        setMessages(prev => {
-          if (prev.find(m => m.id === msg.id)) return prev;
-          return [...prev, { ...msg, status: 'delivered' }];
-        });
-
-        setChats(prev => prev.map(chat => {
-          if (chat.id === msg.chatId) {
-            const currentUserId = user?.id || '';
-            if (activeChatIdRef.current === chat.id) {
-              sendPacket(remotePeerId, {
-                type: 'READ_RECEIPT',
-                payload: { chatId: chat.id, messageId: msg.id, userId: currentUserId }
-              });
-            }
-            return {
-              ...chat,
-              lastMessage: { ...msg, status: 'delivered' },
-              unreadCount: activeChatIdRef.current === chat.id ? 0 : chat.unreadCount + 1,
-              isTyping: false
-            };
-          }
-          return chat;
-        }));
+        sendPacket(remotePeerId, { type: 'DELIVERY_CONFIRM', payload: { chatId: msg.chatId, messageId: msg.id } });
+        setMessages(prev => prev.some(m => m.id === msg.id) ? prev : [...prev, { ...msg, status: 'delivered' }]);
+        setChats(prev => prev.map(c => c.id === msg.chatId ? { 
+          ...c, 
+          lastMessage: msg, 
+          unreadCount: activeChatIdRef.current === c.id ? 0 : c.unreadCount + 1,
+          isTyping: false
+        } : c));
         break;
-      }
-      case 'DELIVERY_CONFIRM': {
-        const { messageId, chatId } = data.payload;
-        setMessages(prev => prev.map(m => (m.id === messageId) ? { ...m, status: 'delivered' } : m));
-        setChats(prev => prev.map(c => 
-          (c.id === chatId && c.lastMessage?.id === messageId) 
-          ? { ...c, lastMessage: { ...c.lastMessage, status: 'delivered' } } 
-          : c
-        ));
+      case 'DELIVERY_CONFIRM':
+        setMessages(prev => prev.map(m => m.id === data.payload.messageId ? { ...m, status: 'delivered' } : m));
         break;
-      }
-      case 'READ_RECEIPT': {
-        const { messageId, chatId } = data.payload;
-        setMessages(prev => prev.map(m => m.id === messageId ? { ...m, status: 'read' } : m));
-        setChats(prev => prev.map(c => 
-          (c.id === chatId && c.lastMessage?.id === messageId) 
-          ? { ...c, lastMessage: { ...c.lastMessage, status: 'read' } } 
-          : c
-        ));
+      case 'TYPING':
+        setChats(prev => prev.map(c => c.id === data.payload.chatId ? { ...c, isTyping: data.payload.isTyping, typingUser: data.payload.userId } : c));
         break;
-      }
-      case 'TYPING': {
-        const { chatId, userId, isTyping } = data.payload;
-        setChats(prev => prev.map(c => {
-          if (c.id === chatId) {
-            return { ...c, isTyping, typingUser: isTyping ? userId : undefined };
-          }
-          return c;
-        }));
+      case 'GROUP_INVITE':
+        setChats(prev => prev.some(c => c.id === data.payload.id) ? prev : [...prev, data.payload]);
         break;
-      }
-      case 'GROUP_INVITE': {
-        const groupChat = data.payload;
-        setChats(prev => {
-          if (prev.find(c => c.id === groupChat.id)) return prev;
-          return [...prev, groupChat];
-        });
-        break;
-      }
     }
-  }, [sendPacket, user?.id]);
+  }, [sendPacket]);
 
-  const setupConnection = useCallback((conn: DataConnection, peerId: string, autoSelect: boolean = false) => {
+  const setupConnection = useCallback((conn: DataConnection, peerId: string, autoSelect = false) => {
     conn.on('open', () => {
       connRefs.current.set(peerId, conn);
-      const userStr = localStorage.getItem('velo_chat_user') || '{}';
-      const currentUserId = JSON.parse(userStr).id;
-
       setChats(prev => {
         const existing = prev.find(c => !c.isGroup && c.participants.includes(peerId));
-        if (existing) {
-          if (autoSelect) setActiveChatId(existing.id);
-          return prev;
-        }
+        if (existing) { if (autoSelect) setActiveChatId(existing.id); return prev; }
         const newChatId = uuidv4();
         if (autoSelect) setActiveChatId(newChatId);
-        return [...prev, {
-          id: newChatId,
-          name: `Node ${peerId.slice(0, 4)}`,
-          isGroup: false,
-          participants: [currentUserId, peerId],
-          unreadCount: 0,
-          avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=${peerId}`
+        return [...prev, { 
+          id: newChatId, 
+          name: `Node ${peerId.slice(0, 6)}`, 
+          isGroup: false, 
+          participants: [user!.id, peerId], 
+          unreadCount: 0, 
+          avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=${peerId}` 
         }];
       });
     });
-
-    conn.on('data', (data) => handleData(data as P2PDataPacket, peerId));
+    conn.on('data', (d) => handleData(d as P2PDataPacket, peerId));
     conn.on('close', () => connRefs.current.delete(peerId));
-    conn.on('error', () => connRefs.current.delete(peerId));
-  }, [handleData]);
-
-  const connectToPeer = useCallback((peerId: string, currentPeer: Peer, autoSelect: boolean = false) => {
-    if (!peerId || !currentPeer) return;
-    const currentUserStr = localStorage.getItem('velo_chat_user');
-    if (!currentUserStr) return;
-    const currentUser = JSON.parse(currentUserStr);
-
-    if (peerId === currentUser.id || connRefs.current.has(peerId)) {
-      if (autoSelect) {
-        setChats(prev => {
-          const chat = prev.find(c => !c.isGroup && c.participants.includes(peerId));
-          if (chat) setActiveChatId(chat.id);
-          return prev;
-        });
-      }
-      return;
-    }
-
-    const conn = currentPeer.connect(peerId, { reliable: true });
-    setupConnection(conn, peerId, autoSelect);
-  }, [setupConnection]);
+  }, [handleData, user]);
 
   const initPeer = useCallback((profile: UserProfile) => {
-    if (peerInitialized.current) return;
-    peerInitialized.current = true;
-    setInitError(null);
     setIsInitializing(true);
-
-    const newPeer = new Peer({
-      config: {
+    setInitError(null);
+    const newPeer = new Peer({ 
+      config: { 
         iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun.l.google.com:19302' }, 
           { urls: 'stun:global.stun.twilio.com:3478' }
-        ]
-      }
+        ] 
+      } 
     });
 
     newPeer.on('open', (id) => {
-      const updatedUser = { ...profile, id };
-      setUser(updatedUser);
-      localStorage.setItem('velo_chat_user', JSON.stringify(updatedUser));
-      
-      const urlParams = new URLSearchParams(window.location.search);
-      const inviteId = urlParams.get('id');
+      const u = { ...profile, id };
+      setUser(u);
+      localStorage.setItem('velo_chat_user', JSON.stringify(u));
+      const inviteId = new URLSearchParams(window.location.search).get('id');
       if (inviteId && inviteId !== id) {
-        setTimeout(() => connectToPeer(inviteId, newPeer, true), 1500);
-        const newUrl = new URL(window.location.href);
-        newUrl.searchParams.delete('id');
-        window.history.replaceState({}, document.title, newUrl.pathname + newUrl.search);
+        setTimeout(() => {
+          const conn = newPeer.connect(inviteId, { reliable: true });
+          setupConnection(conn, inviteId, true);
+        }, 1200);
       }
       setIsInitializing(false);
       setPeer(newPeer);
     });
 
-    newPeer.on('connection', (conn) => setupConnection(conn, conn.peer));
+    newPeer.on('connection', (c) => setupConnection(c, c.peer));
     newPeer.on('error', (err) => {
-      if (!newPeer.open) {
-        setInitError(`Nexus Error: ${err.type}.`);
-        setIsInitializing(false);
-        peerInitialized.current = false;
+      console.error('PeerJS Mesh Error:', err);
+      setIsInitializing(false);
+      setInitError("Network Handshake Failed. Connection is restricted.");
+    });
+  }, [setupConnection]);
+
+  useEffect(() => {
+    const saved = localStorage.getItem('velo_chat_user');
+    if (saved && !peer) initPeer(JSON.parse(saved));
+    else setIsInitializing(false);
+  }, [initPeer, peer]);
+
+  const sendMessage = async (chatId: string, content: string) => {
+    if (!user) return;
+    const msg: Message = { 
+      id: uuidv4(), 
+      senderId: user.id, 
+      senderName: user.name, 
+      content, 
+      timestamp: Date.now(), 
+      type: MessageType.TEXT, 
+      chatId, 
+      status: 'sending' 
+    };
+    
+    setMessages(prev => [...prev, msg]);
+    setChats(prev => prev.map(c => c.id === chatId ? { ...c, lastMessage: msg } : c));
+    
+    const chat = chats.find(c => c.id === chatId);
+    let sentToAnyone = false;
+    chat?.participants.forEach(pId => {
+      if (pId !== user.id) {
+        if (sendPacket(pId, { type: 'MESSAGE', payload: msg })) sentToAnyone = true;
       }
     });
 
-    return newPeer;
-  }, [connectToPeer, setupConnection]);
-
-  useEffect(() => {
-    const savedUser = localStorage.getItem('velo_chat_user');
-    if (savedUser) {
-      const p = JSON.parse(savedUser);
-      const pInstance = initPeer(p);
-      return () => {
-        pInstance?.destroy();
-        peerInitialized.current = false;
-      };
-    } else {
-      setIsInitializing(false);
+    if (sentToAnyone) {
+      setMessages(prev => prev.map(m => m.id === msg.id ? { ...m, status: 'sent' } : m));
     }
-  }, [initPeer]);
 
-  const sendMessage = async (chatId: string, content: string, type: MessageType = MessageType.TEXT) => {
-    if (!user || !peer) return;
-    const chat = chats.find(c => c.id === chatId);
-    if (!chat) return;
-
-    const messageId = uuidv4();
-    const newMessage: Message = {
-      id: messageId,
-      senderId: user.id,
-      senderName: user.name,
-      content,
-      timestamp: Date.now(),
-      type,
-      chatId,
-      status: 'sending'
-    };
-
-    setMessages(prev => [...prev, newMessage]);
-    setChats(prev => prev.map(c => c.id === chatId ? { ...c, lastMessage: newMessage } : c));
-
-    setTimeout(() => {
-      const userStr = localStorage.getItem('velo_chat_user');
-      if (!userStr) return;
-      const currentUserId = JSON.parse(userStr).id;
-      let success = false;
-      chat.participants.forEach(pId => {
-        if (pId !== currentUserId) {
-          if (sendPacket(pId, { type: 'MESSAGE', payload: { ...newMessage, status: 'sent' } })) {
-            success = true;
-          }
-        }
-      });
-      setMessages(prev => prev.map(m => m.id === messageId ? { ...m, status: success ? 'sent' : 'failed' } : m));
-    }, 50);
-
-    if (content.toLowerCase().startsWith('@gemini')) {
-      const response = await gemini.current.getChatResponse(content.replace('@gemini', '').trim());
-      if (response) {
-        const aiMsg: Message = {
-          id: uuidv4(),
-          senderId: 'gemini-ai',
-          senderName: 'Velo AI',
-          content: response,
-          timestamp: Date.now(),
-          type: MessageType.TEXT,
-          chatId,
-          status: 'read'
+    if (content.toLowerCase().includes('@gemini')) {
+      const reply = await gemini.current.getChatResponse(content);
+      if (reply) {
+        const aiMsg: Message = { 
+          id: uuidv4(), 
+          senderId: 'gemini-ai', 
+          senderName: 'Velo AI', 
+          content: reply, 
+          timestamp: Date.now(), 
+          type: MessageType.TEXT, 
+          chatId, 
+          status: 'read' 
         };
         setMessages(prev => [...prev, aiMsg]);
         setChats(prev => prev.map(c => c.id === chatId ? { ...c, lastMessage: aiMsg } : c));
@@ -310,54 +202,33 @@ const App: React.FC = () => {
     }
   };
 
-  const handleTyping = (chatId: string, isTyping: boolean) => {
-    if (!user) return;
-    const userStr = localStorage.getItem('velo_chat_user');
-    if (!userStr) return;
-    const currentUserId = JSON.parse(userStr).id;
-    const chat = chats.find(c => c.id === chatId);
-    if (chat) {
-      chat.participants.forEach(pId => {
-        if (pId !== currentUserId) {
-          sendPacket(pId, { type: 'TYPING', payload: { chatId, userId: user.name, isTyping } });
-        }
-      });
-    }
-  };
-
-  const createGroup = (name: string, participantIds: string[]) => {
+  const handleCreateGroup = (name: string, participants: string[]) => {
     if (!user) return;
     const groupId = uuidv4();
     const newChat: Chat = {
       id: groupId,
       name,
       isGroup: true,
-      participants: [user.id, ...participantIds],
+      participants: [user.id, ...participants],
       unreadCount: 0,
       avatar: `https://api.dicebear.com/7.x/identicon/svg?seed=${groupId}`
     };
     setChats(prev => [...prev, newChat]);
-    participantIds.forEach(pId => sendPacket(pId, { type: 'GROUP_INVITE', payload: newChat }));
+    participants.forEach(pId => sendPacket(pId, { type: 'GROUP_INVITE', payload: newChat }));
     setActiveChatId(groupId);
   };
 
-  const activeChat = chats.find(c => c.id === activeChatId);
-  const activeMessages = messages.filter(m => m.chatId === activeChatId);
+  const handleTyping = (chatId: string, isTyping: boolean) => {
+    if (!user) return;
+    const chat = chats.find(c => c.id === chatId);
+    chat?.participants.forEach(pId => {
+      if (pId !== user.id) {
+        sendPacket(pId, { type: 'TYPING', payload: { chatId, userId: user.name, isTyping } });
+      }
+    });
+  };
 
-  if (!user) {
-    return (
-      <WelcomeScreen 
-        onProfileComplete={(profile) => initPeer(profile)}
-        isInitializing={isInitializing}
-        error={initError}
-        onRetry={() => {
-            const savedUser = localStorage.getItem('velo_chat_user');
-            if (savedUser) initPeer(JSON.parse(savedUser));
-            else window.location.reload();
-        }}
-      />
-    );
-  }
+  if (!user) return <WelcomeScreen onProfileComplete={initPeer} isInitializing={isInitializing} error={initError} onRetry={() => window.location.reload()} />;
 
   return (
     <div className="flex h-screen bg-[#f0f2f5] overflow-hidden text-gray-900 selection:bg-teal-100 font-sans">
@@ -366,45 +237,46 @@ const App: React.FC = () => {
           user={user} 
           chats={chats} 
           activeChatId={activeChatId} 
-          onChatSelect={(id) => setActiveChatId(id)}
-          onConnect={(id) => peer && connectToPeer(id, peer, true)}
-          onCreateGroup={createGroup}
-          inviteLink={generateInviteLink(user.id)}
+          onChatSelect={setActiveChatId} 
+          onConnect={(id) => peer && setupConnection(peer.connect(id, { reliable: true }), id, true)} 
+          onCreateGroup={handleCreateGroup}
+          inviteLink={generateInviteLink(user.id)} 
         />
       </div>
       <div className={`flex-1 relative flex flex-col min-w-0 h-full bg-white transition-all duration-300 ${!activeChatId ? 'hidden md:flex' : 'flex'}`}>
-        {activeChat ? (
+        {activeChatId ? (
           <ChatArea 
-            chat={activeChat} 
-            messages={activeMessages} 
+            chat={chats.find(c => c.id === activeChatId)!} 
+            messages={messages.filter(m => m.chatId === activeChatId)} 
             onSendMessage={sendMessage} 
-            onTyping={handleTyping}
-            currentUser={user}
-            onBack={() => setActiveChatId(null)}
+            onTyping={handleTyping} 
+            currentUser={user} 
+            onBack={() => setActiveChatId(null)} 
           />
         ) : (
-          <div className="flex-1 flex flex-col items-center justify-center whatsapp-bg h-full">
-            <div className="bg-white/95 p-12 md:p-16 rounded-[4rem] shadow-2xl text-center backdrop-blur-3xl max-w-2xl border border-white group hidden md:block">
-              <div className="w-24 h-24 bg-teal-600 rounded-[2.5rem] mx-auto mb-8 flex items-center justify-center text-white">
+          <div className="flex-1 flex flex-col items-center justify-center whatsapp-bg h-full mesh-grid">
+            <div className="bg-white/95 p-16 rounded-[4rem] shadow-2xl text-center backdrop-blur-3xl max-w-2xl border border-white group hidden md:block">
+              <div className="w-24 h-24 bg-teal-600 rounded-[2.5rem] mx-auto mb-8 flex items-center justify-center text-white shadow-xl rotate-3 group-hover:rotate-0 transition-transform duration-700">
                 <svg xmlns="http://www.w3.org/2000/svg" className="h-12 w-12" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M13 10V3L4 14h7v7l9-11h-7z" />
                 </svg>
               </div>
               <h1 className="text-5xl font-black text-gray-900 mb-6">Velo <span className="text-teal-600">Mesh</span></h1>
-              <p className="text-gray-500 mb-10 text-lg font-medium">Distributed P2P Messaging Hub</p>
-              <div className="p-6 bg-gray-50/50 rounded-3xl border border-gray-100 w-full hover:bg-white transition-all shadow-inner">
-                <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-4">Your Nexus Link</p>
-                <code className="block text-teal-700 font-mono text-xs break-all bg-white p-4 rounded-xl border border-gray-200 mb-4 select-all">
+              <p className="text-gray-500 mb-12 text-lg font-medium">Distributed Sovereignty • Pure Peer-to-Peer</p>
+              
+              <div className="p-8 bg-gray-50 rounded-[2.5rem] border border-gray-100 w-full hover:bg-white transition-all duration-500 shadow-inner">
+                <p className="text-[10px] font-black text-gray-400 uppercase tracking-[0.4em] mb-4">Your Nexus Global Link</p>
+                <code className="block text-teal-700 font-mono text-xs break-all bg-white p-6 rounded-2xl border border-gray-200 mb-6 select-all shadow-sm">
                   {generateInviteLink(user.id)}
                 </code>
                 <button 
                   onClick={() => {
                     navigator.clipboard.writeText(generateInviteLink(user.id));
-                    alert('Copied!');
+                    alert('Invite Link Copied!');
                   }}
-                  className="px-8 py-3 bg-teal-600 text-white rounded-2xl font-black hover:bg-teal-700 transition-all active:scale-95"
+                  className="px-10 py-4 bg-teal-600 text-white rounded-2xl font-black hover:bg-teal-700 transition-all shadow-xl active:scale-95"
                 >
-                  Copy Link
+                  Copy Handshake Link
                 </button>
               </div>
             </div>
