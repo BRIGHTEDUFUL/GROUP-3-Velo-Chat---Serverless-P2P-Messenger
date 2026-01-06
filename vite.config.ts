@@ -4,7 +4,10 @@ import react from '@vitejs/plugin-react';
 
 export default defineConfig(({ mode }) => {
     const env = loadEnv(mode, '.', '');
+    // Use environment variable for base path, or default to repository name for GitHub Pages
+    const base = process.env.BASE_PATH || '/GROUP-3-Velo-Chat---Serverless-P2P-Messenger/';
     return {
+      base,
       server: {
         port: 3000,
         host: '0.0.0.0',
