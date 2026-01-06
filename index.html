@@ -31,10 +31,18 @@
         background-size: 24px 24px;
         opacity: 0.15;
       }
+
+      /* Transitions for mobile view switching */
+      .chat-transition-enter { transform: translateX(100%); }
+      .chat-transition-enter-active { transform: translateX(0); transition: transform 300ms ease-out; }
     </style>
     <script>
-      // Shim process for libraries that expect it (like PeerJS or GenAI)
-      window.process = { env: { NODE_ENV: 'production' } };
+      // Essential shims for browser-native ESM environments
+      window.global = window;
+      window.process = { 
+        env: { NODE_ENV: 'production' },
+        nextTick: (cb) => setTimeout(cb, 0)
+      };
     </script>
     <script type="importmap">
 {

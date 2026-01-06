@@ -19,7 +19,6 @@ const App: React.FC = () => {
       const saved = localStorage.getItem('velo_chat_user');
       return saved ? JSON.parse(saved) : null;
     } catch (e) { 
-      console.error("Storage Error:", e);
       return null; 
     }
   });
@@ -53,15 +52,19 @@ const App: React.FC = () => {
   }, [activeChatId]);
 
   useEffect(() => {
-    localStorage.setItem('velo_chat_chats', JSON.stringify(chats));
+    if (chats.length > 0) {
+      localStorage.setItem('velo_chat_chats', JSON.stringify(chats));
+    }
   }, [chats]);
 
   useEffect(() => {
-    localStorage.setItem('velo_chat_messages', JSON.stringify(messages));
+    if (messages.length > 0) {
+      localStorage.setItem('velo_chat_messages', JSON.stringify(messages));
+    }
   }, [messages]);
 
   const generateInviteLink = useCallback((id: string) => {
-    const url = new URL(window.location.href);
+    const url = new URL(window.location.origin + window.location.pathname);
     url.searchParams.set('id', id);
     return url.href;
   }, []);
@@ -113,16 +116,17 @@ const App: React.FC = () => {
         if (autoSelect) setActiveChatId(newChatId);
         return [...prev, { 
           id: newChatId, 
-          name: `Node ${peerId.slice(0, 6).toUpperCase()}`, 
+          name: `Peer ${peerId.slice(0, 4).toUpperCase()}`, 
           isGroup: false, 
           participants: [user!.id, peerId], 
           unreadCount: 0, 
-          avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=${peerId}` 
+          avatar: `https://api.dicebear.com/7.x/bottts/svg?seed=${peerId}` 
         }];
       });
     });
     conn.on('data', (d) => handleData(d as P2PDataPacket, peerId));
     conn.on('close', () => connRefs.current.delete(peerId));
+    conn.on('error', (err) => console.error("Peer connection error:", err));
   }, [handleData, user]);
 
   const initPeer = useCallback((profile: UserProfile) => {
@@ -130,7 +134,7 @@ const App: React.FC = () => {
     setInitError(null);
     try {
       const newPeer = new Peer({ 
-        config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] } 
+        config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }] } 
       });
 
       newPeer.on('open', (id) => {
@@ -146,12 +150,13 @@ const App: React.FC = () => {
       });
 
       newPeer.on('connection', (c) => setupConnection(c, c.peer));
-      newPeer.on('error', () => {
-        setInitError("Network restricted. P2P Handshake failed.");
+      newPeer.on('error', (err) => {
+        console.error("PeerJS Main Error:", err);
+        setInitError("Network Link Error. Check if your firewall blocks WebRTC.");
         setIsInitializing(false);
       });
     } catch (e) {
-      setInitError("System failure.");
+      setInitError("System failure during node initialization.");
       setIsInitializing(false);
     }
   }, [setupConnection]);
@@ -202,7 +207,7 @@ const App: React.FC = () => {
   if (!user) return <WelcomeScreen onProfileComplete={initPeer} isInitializing={isInitializing} error={initError} onRetry={() => window.location.reload()} />;
 
   return (
-    <div className="flex h-screen bg-slate-50 overflow-hidden text-slate-900">
+    <div className="flex h-screen bg-slate-50 overflow-hidden text-slate-900 selection:bg-teal-100">
       <div className={`flex flex-col h-full w-full md:w-[400px] shrink-0 border-r border-slate-200 ${activeChatId ? 'hidden md:flex' : 'flex'}`}>
         <Sidebar 
           user={user} 
@@ -232,15 +237,23 @@ const App: React.FC = () => {
         ) : (
           <div className="flex-1 flex flex-col items-center justify-center mesh-bg h-full relative p-6">
             <div className="absolute inset-0 mesh-dot-grid" />
-            <div className="bg-white/95 p-10 rounded-[3rem] shadow-2xl text-center backdrop-blur-md max-w-sm border border-white z-10">
-              <h1 className="text-4xl font-black text-slate-900 mb-2">Velo Mesh</h1>
+            <div className="bg-white/95 p-12 rounded-[3.5rem] shadow-2xl text-center backdrop-blur-md max-w-sm border border-white z-10 relative">
+              <div className="w-20 h-20 bg-teal-600 rounded-3xl mx-auto mb-8 flex items-center justify-center text-white shadow-xl">
+                 <svg xmlns="http://www.w3.org/2000/svg" className="h-10 w-10" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                </svg>
+              </div>
+              <h1 className="text-4xl font-black text-slate-900 mb-2 tracking-tighter">Velo Mesh</h1>
               <p className="text-slate-500 mb-8 font-medium">Distributed P2P Sovereignty.</p>
-              <button 
-                onClick={() => { navigator.clipboard.writeText(generateInviteLink(user.id)); alert('Linked!'); }}
-                className="w-full py-4 bg-teal-600 text-white rounded-2xl font-bold shadow-lg hover:bg-teal-700"
-              >
-                Copy My Node Link
-              </button>
+              <div className="space-y-4">
+                <button 
+                  onClick={() => { navigator.clipboard.writeText(generateInviteLink(user.id)); alert('Node link copied!'); }}
+                  className="w-full py-4 bg-teal-600 text-white rounded-2xl font-black shadow-lg hover:bg-teal-700 transition-all active:scale-95"
+                >
+                  Copy My Node Link
+                </button>
+                <p className="text-[10px] text-slate-300 font-bold uppercase tracking-widest">Send this link to someone to start chatting</p>
+              </div>
             </div>
           </div>
         )}
