@@ -8,11 +8,11 @@ import {
   UserProfile, 
   MessageType, 
   P2PDataPacket 
-} from './types';
-import Sidebar from './components/Sidebar';
-import ChatArea from './components/ChatArea';
-import WelcomeScreen from './components/WelcomeScreen';
-import { GeminiService } from './services/geminiService';
+} from './types.ts';
+import Sidebar from './Sidebar.tsx';
+import ChatArea from './ChatArea.tsx';
+import WelcomeScreen from './WelcomeScreen.tsx';
+import { GeminiService } from './geminiService.ts';
 
 const App: React.FC = () => {
   const [peer, setPeer] = useState<Peer | null>(null);
@@ -37,9 +37,9 @@ const App: React.FC = () => {
   const gemini = useRef(new GeminiService());
   const peerInitialized = useRef(false);
 
-  // Path-resilient link generation for GitHub Pages and Custom Domains
   const generateInviteLink = useCallback((id: string) => {
-    const url = new URL(window.location.origin + window.location.pathname);
+    const baseUrl = window.location.origin + window.location.pathname;
+    const url = new URL(baseUrl);
     url.searchParams.set('id', id);
     return url.href;
   }, []);
@@ -108,16 +108,22 @@ const App: React.FC = () => {
       }
       case 'DELIVERY_CONFIRM': {
         const { messageId, chatId } = data.payload;
-        setMessages(prev => prev.map(m => 
-          (m.id === messageId && (m.status === 'sending' || m.status === 'sent')) 
-            ? { ...m, status: 'delivered' } 
-            : m
+        setMessages(prev => prev.map(m => (m.id === messageId) ? { ...m, status: 'delivered' } : m));
+        setChats(prev => prev.map(c => 
+          (c.id === chatId && c.lastMessage?.id === messageId) 
+          ? { ...c, lastMessage: { ...c.lastMessage, status: 'delivered' } } 
+          : c
         ));
         break;
       }
       case 'READ_RECEIPT': {
-        const { messageId } = data.payload;
+        const { messageId, chatId } = data.payload;
         setMessages(prev => prev.map(m => m.id === messageId ? { ...m, status: 'read' } : m));
+        setChats(prev => prev.map(c => 
+          (c.id === chatId && c.lastMessage?.id === messageId) 
+          ? { ...c, lastMessage: { ...c.lastMessage, status: 'read' } } 
+          : c
+        ));
         break;
       }
       case 'TYPING': {
@@ -140,24 +146,6 @@ const App: React.FC = () => {
       }
     }
   }, [sendPacket, user?.id]);
-
-  const broadcastToChat = useCallback((chatId: string, packet: P2PDataPacket) => {
-    const userStr = localStorage.getItem('velo_chat_user');
-    if (!userStr) return false;
-    const currentUserId = JSON.parse(userStr).id;
-
-    let totalSuccess = false;
-    const currentChat = chats.find(c => c.id === chatId);
-    if (currentChat) {
-      currentChat.participants.forEach(pId => {
-        if (pId !== currentUserId) {
-          const success = sendPacket(pId, packet);
-          if (success) totalSuccess = true;
-        }
-      });
-    }
-    return totalSuccess;
-  }, [chats, sendPacket]);
 
   const setupConnection = useCallback((conn: DataConnection, peerId: string, autoSelect: boolean = false) => {
     conn.on('open', () => {
@@ -197,15 +185,18 @@ const App: React.FC = () => {
 
     if (peerId === currentUser.id || connRefs.current.has(peerId)) {
       if (autoSelect) {
-        const chat = chats.find(c => !c.isGroup && c.participants.includes(peerId));
-        if (chat) setActiveChatId(chat.id);
+        setChats(prev => {
+          const chat = prev.find(c => !c.isGroup && c.participants.includes(peerId));
+          if (chat) setActiveChatId(chat.id);
+          return prev;
+        });
       }
       return;
     }
 
     const conn = currentPeer.connect(peerId, { reliable: true });
     setupConnection(conn, peerId, autoSelect);
-  }, [chats, setupConnection]);
+  }, [setupConnection]);
 
   const initPeer = useCallback((profile: UserProfile) => {
     if (peerInitialized.current) return;
@@ -217,9 +208,7 @@ const App: React.FC = () => {
       config: {
         iceServers: [
           { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:global.stun.twilio.com:3478' },
-          { urls: 'stun:stun1.l.google.com:19302' },
-          { urls: 'stun:stun2.l.google.com:19302' }
+          { urls: 'stun:global.stun.twilio.com:3478' }
         ]
       }
     });
@@ -232,9 +221,7 @@ const App: React.FC = () => {
       const urlParams = new URLSearchParams(window.location.search);
       const inviteId = urlParams.get('id');
       if (inviteId && inviteId !== id) {
-        // Delay connection slightly to ensure peer object is ready for calls
         setTimeout(() => connectToPeer(inviteId, newPeer, true), 1500);
-        // Sanitize URL for a cleaner address bar
         const newUrl = new URL(window.location.href);
         newUrl.searchParams.delete('id');
         window.history.replaceState({}, document.title, newUrl.pathname + newUrl.search);
@@ -246,7 +233,7 @@ const App: React.FC = () => {
     newPeer.on('connection', (conn) => setupConnection(conn, conn.peer));
     newPeer.on('error', (err) => {
       if (!newPeer.open) {
-        setInitError(`Mesh Unreachable: ${err.type}. Check network or firewall.`);
+        setInitError(`Nexus Error: ${err.type}.`);
         setIsInitializing(false);
         peerInitialized.current = false;
       }
@@ -290,7 +277,17 @@ const App: React.FC = () => {
     setChats(prev => prev.map(c => c.id === chatId ? { ...c, lastMessage: newMessage } : c));
 
     setTimeout(() => {
-      const success = broadcastToChat(chatId, { type: 'MESSAGE', payload: { ...newMessage, status: 'sent' } });
+      const userStr = localStorage.getItem('velo_chat_user');
+      if (!userStr) return;
+      const currentUserId = JSON.parse(userStr).id;
+      let success = false;
+      chat.participants.forEach(pId => {
+        if (pId !== currentUserId) {
+          if (sendPacket(pId, { type: 'MESSAGE', payload: { ...newMessage, status: 'sent' } })) {
+            success = true;
+          }
+        }
+      });
       setMessages(prev => prev.map(m => m.id === messageId ? { ...m, status: success ? 'sent' : 'failed' } : m));
     }, 50);
 
@@ -315,10 +312,17 @@ const App: React.FC = () => {
 
   const handleTyping = (chatId: string, isTyping: boolean) => {
     if (!user) return;
-    broadcastToChat(chatId, {
-      type: 'TYPING',
-      payload: { chatId, userId: user.name, isTyping }
-    });
+    const userStr = localStorage.getItem('velo_chat_user');
+    if (!userStr) return;
+    const currentUserId = JSON.parse(userStr).id;
+    const chat = chats.find(c => c.id === chatId);
+    if (chat) {
+      chat.participants.forEach(pId => {
+        if (pId !== currentUserId) {
+          sendPacket(pId, { type: 'TYPING', payload: { chatId, userId: user.name, isTyping } });
+        }
+      });
+    }
   };
 
   const createGroup = (name: string, participantIds: string[]) => {
@@ -365,6 +369,7 @@ const App: React.FC = () => {
           onChatSelect={(id) => setActiveChatId(id)}
           onConnect={(id) => peer && connectToPeer(id, peer, true)}
           onCreateGroup={createGroup}
+          inviteLink={generateInviteLink(user.id)}
         />
       </div>
       <div className={`flex-1 relative flex flex-col min-w-0 h-full bg-white transition-all duration-300 ${!activeChatId ? 'hidden md:flex' : 'flex'}`}>
@@ -379,36 +384,28 @@ const App: React.FC = () => {
           />
         ) : (
           <div className="flex-1 flex flex-col items-center justify-center whatsapp-bg h-full">
-            <div className="bg-white/95 p-12 md:p-16 rounded-[4rem] shadow-[0_40px_100px_-20px_rgba(0,0,0,0.12)] text-center backdrop-blur-3xl max-w-2xl border border-white group hover:scale-[1.005] transition-all duration-700 hidden md:block">
-              <div className="w-32 h-32 bg-gradient-to-br from-teal-500 via-emerald-500 to-teal-700 rounded-[3rem] mx-auto mb-12 flex items-center justify-center text-white shadow-[0_30px_60px_-12px_rgba(20,184,166,0.3)] rotate-3 group-hover:rotate-0 transition-all duration-1000">
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-16 w-16" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <div className="bg-white/95 p-12 md:p-16 rounded-[4rem] shadow-2xl text-center backdrop-blur-3xl max-w-2xl border border-white group hidden md:block">
+              <div className="w-24 h-24 bg-teal-600 rounded-[2.5rem] mx-auto mb-8 flex items-center justify-center text-white">
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-12 w-12" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M13 10V3L4 14h7v7l9-11h-7z" />
                 </svg>
               </div>
-              <h1 className="text-6xl font-black text-gray-900 mb-6 tracking-tight">Velo <span className="text-teal-600">Mesh</span></h1>
-              <p className="text-gray-500 mb-12 leading-relaxed text-xl font-medium text-pretty px-8">
-                The distributed messenger. Securely peer with others via decentralized signaling.
-              </p>
-              
-              <div className="flex flex-col items-center p-8 bg-gray-50/50 rounded-[3rem] border border-gray-100 w-full hover:bg-white transition-all duration-500 shadow-inner">
-                <p className="text-[10px] font-black text-gray-400 uppercase tracking-[0.4em] mb-6">Your Node ID Link</p>
-                <div className="flex flex-col sm:flex-row items-center gap-3 w-full">
-                  <code className="flex-1 text-teal-700 font-mono text-xs break-all select-all bg-white px-6 py-4 rounded-2xl border border-gray-200 shadow-sm overflow-hidden text-ellipsis whitespace-nowrap">
-                    {generateInviteLink(user.id)}
-                  </code>
-                  <button 
-                    onClick={() => {
-                      navigator.clipboard.writeText(generateInviteLink(user.id));
-                      alert('Nexus Invite Copied!');
-                    }}
-                    className="flex items-center gap-2 px-8 py-4 bg-teal-600 text-white rounded-2xl font-black hover:bg-teal-700 transition-all shadow-xl shadow-teal-600/20 active:scale-95 whitespace-nowrap"
-                  >
-                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" />
-                    </svg>
-                    Copy Link
-                  </button>
-                </div>
+              <h1 className="text-5xl font-black text-gray-900 mb-6">Velo <span className="text-teal-600">Mesh</span></h1>
+              <p className="text-gray-500 mb-10 text-lg font-medium">Distributed P2P Messaging Hub</p>
+              <div className="p-6 bg-gray-50/50 rounded-3xl border border-gray-100 w-full hover:bg-white transition-all shadow-inner">
+                <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-4">Your Nexus Link</p>
+                <code className="block text-teal-700 font-mono text-xs break-all bg-white p-4 rounded-xl border border-gray-200 mb-4 select-all">
+                  {generateInviteLink(user.id)}
+                </code>
+                <button 
+                  onClick={() => {
+                    navigator.clipboard.writeText(generateInviteLink(user.id));
+                    alert('Copied!');
+                  }}
+                  className="px-8 py-3 bg-teal-600 text-white rounded-2xl font-black hover:bg-teal-700 transition-all active:scale-95"
+                >
+                  Copy Link
+                </button>
               </div>
             </div>
           </div>
